@@ -274,7 +274,7 @@ const processVerification = async (req, res) => {
 
 };
 
-function speak(twiml, textToSpeak, contentLanguage = "en-US"){
+function speak(twiml, textToSpeak, contentLanguage = "no-STT"){
   twiml.say(textToSpeak, {
     voice: "alice",
     language: contentLanguage
