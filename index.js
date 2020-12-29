@@ -27,12 +27,33 @@ express()
   .post('/process_enrollment', (req, res) => processEnrollment(req, res))
   .post('/verify', (req, res) => verify(req, res))
   .post('/process_verification', (req, res) => processVerification(req, res))
+  .post('/incoming_call_auth', (req, res) => incomingCallAuth(req, res))
+  .post('/enroll_or_verify_auth', (req, res) => enrollOrVerifyAuth(req, res))
+  .post('/enroll_auth', (req, res) => enrollAuth(req, res))
+  .post('/process_enrollment_auth', (req, res) => processEnrollmentAuth(req, res))
+  .post('/verify_auth', (req, res) => verifyAuth(req, res))
+  .post('/process_verification_auth', (req, res) => processVerificationAuth(req, res))
   .listen(PORT, () => console.log(`Listening on port ${ PORT }`))
 
 const callerUserId = async (phone) => {
   try {
     const client = await pool.connect()
     const result = await client.query('SELECT userId FROM users where phone=\'' + phone + '\'');
+    client.release();
+    // Check for user in db
+    if (Object.keys(result.rows).length !== 0) {
+      return result.rows[0].userid;
+    }
+  } catch (err) {
+      console.error(err);
+  }
+  return 0
+};
+
+const callerUserIdAuth = async (authId) => {
+  try {
+    const client = await pool.connect()
+    const result = await client.query('SELECT userId FROM authusers where authId=\'' + authId + '\'');
     client.release();
     // Check for user in db
     if (Object.keys(result.rows).length !== 0) {
@@ -83,6 +104,53 @@ const incomingCall = async (req, res) => {
         }
 
         twiml.redirect('/enroll');
+        res.type('text/xml');
+        res.send(twiml.toString());
+      });
+    }
+  });
+};
+
+const incomingCallAuth = async (req, res) => {
+  const twiml = new VoiceResponse();
+  const authId = removeSpecialChars(req.query.authId); // this is a problem
+  const phone = removeSpecialChars(req.body.To);
+  const userId = await callerUserId(phone);
+
+  // Check for user in VoiceIt db
+  myVoiceIt.checkUserExists({
+    userId :userId
+  }, async (jsonResponse)=>{
+    // User already exists
+    if(jsonResponse.exists === true) {
+      // Greet the caller when their account profile is recognized by the VoiceIt API.
+      speak(twiml, "Welcome back to the Voice It Verification Demo, your user id is " + userId + " ");
+      // Let's provide the caller with an opportunity to enroll by typing `1` on
+      // their phone's keypad. Use the <Gather> verb to collect user input
+      const gather = twiml.gather({
+        action: '/enroll_or_verify_auth',
+        numDigits: 1,
+        timeout: 5
+      });
+      speak(gather, "You may now log in, or press one to re enroll");
+      twiml.redirect('/enroll_or_verify_auth?digits=TIMEOUT');
+      res.type('text/xml');
+      res.send(twiml.toString());
+
+    } else {
+      // Create a new user for new number
+      myVoiceIt.createUser(async (jsonResponse)=>{
+        speak(twiml, "Welcome to the Voice It Verification Demo, you are a new user and will now be enrolled");
+        try {
+          const client = await pool.connect()
+          const result = await client.query('insert into authusers values ('+ phone +', \'' + jsonResponse.userId + '\',\'' + authId + '\')');
+          client.release();
+        } catch (err) {
+          console.error(err);
+          res.send("Error " + err);
+        }
+
+        twiml.redirect('/enroll_auth');
         res.type('text/xml');
         res.send(twiml.toString());
       });
@@ -141,6 +209,54 @@ const enrollOrVerify = async (req, res) => {
   }
 };
 
+const enrollOrVerifyAuth = async (req, res) => {
+  const digits = req.body.Digits;
+  const phone = removeSpecialChars(req.body.To);
+  const twiml = new VoiceResponse();
+  const userId = await callerUserIdAuth(phone);
+  // When the caller asked to enroll by pressing `1`, provide friendly
+  // instructions, otherwise, we always assume their intent is to verify.
+  if (digits == 1) {
+    //Delete User's voice enrollments and re-enroll
+    myVoiceIt.deleteAllEnrollments({
+      userId: userId,
+      }, async (jsonResponse)=>{
+        console.log("deleteAllEnrollments JSON: ", jsonResponse.message);
+        speak(twiml, "You have chosen to re enroll your voice, you will now be asked to say a phrase three times, then you will be able to log in with that phrase");
+        twiml.redirect('/enroll_auth');
+        res.type('text/xml');
+        res.send(twiml.toString());
+    });
+
+  } else {
+    //Check for number of enrollments > 2
+    myVoiceIt.getAllVoiceEnrollments({
+      userId: userId
+      }, async (jsonResponse)=>{
+        speak(twiml, "You have chosen to verify your Voice.");
+        console.log("jsonResponse.message: ", jsonResponse.message);
+        const enrollmentsCount = jsonResponse.count;
+        console.log("enrollmentsCount: ", enrollmentsCount);
+        if(enrollmentsCount > 2){
+          twiml.redirect('/verify_auth');
+          res.type('text/xml');
+          res.send(twiml.toString());
+        } else{
+          speak(twiml, "You do not have enough enrollments and need to re enroll your voice.");
+          //Delete User's voice enrollments and re-enroll
+          myVoiceIt.deleteAllEnrollments({
+            userId: userId,
+            }, async (jsonResponse)=>{
+              console.log("deleteAllEnrollments JSON: ", jsonResponse.message);
+              twiml.redirect('/enroll_auth');
+              res.type('text/xml');
+              res.send(twiml.toString());
+          });
+        }
+    });
+  }
+};
+
 // Enrollment Recording
 const enroll = async (req, res) => {
   const enrollCount = req.query.enrollCount || 0;
@@ -150,6 +266,21 @@ const enroll = async (req, res) => {
 
   twiml.record({
     action: '/process_enrollment?enrollCount=' + enrollCount,
+    maxLength: 5,
+    trim: 'do-not-trim'
+  });
+  res.type('text/xml');
+  res.send(twiml.toString());
+};
+
+const enrollAuth = async (req, res) => {
+  const enrollCount = req.query.enrollCount || 0;
+  const twiml = new VoiceResponse();
+  speak(twiml, 'Please say the following phrase to enroll ');
+  speak(twiml, config.chosenVoicePrintPhrase, config.contentLanguage);
+
+  twiml.record({
+    action: '/process_enrollment_auth?enrollCount=' + enrollCount,
     maxLength: 5,
     trim: 'do-not-trim'
   });
@@ -201,6 +332,49 @@ const processEnrollment = async (req, res) => {
   });
 }
 
+const processEnrollmentAuth = async (req, res) => {
+  const userId = await callerUserId(removeSpecialChars(req.body.To));
+  var enrollCount = req.query.enrollCount;
+  const recordingURL = req.body.RecordingUrl + ".wav";
+  const twiml = new VoiceResponse();
+
+  function enrollmentDone(){
+      enrollCount++;
+      // VoiceIt requires at least 3 successful enrollments.
+      if (enrollCount > 2) {
+        speak(twiml, 'Thank you, recording received, you are now enrolled and ready to log in');
+        twiml.redirect('/verify_auth');
+      } else {
+        speak(twiml, 'Thank you, recording received, you will now be asked to record your phrase again');
+        twiml.redirect('/enroll_auth?enrollCount=' + enrollCount);
+      }
+  }
+
+  function enrollAgain(){
+    speak(twiml, 'Your recording was not successful, please try again');
+    twiml.redirect('/enroll_auth?enrollCount=' + enrollCount);
+  }
+
+  // Sleep and wait for Twillio to make file available
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  myVoiceIt.createVoiceEnrollmentByUrl({
+    userId: userId,
+	  audioFileURL: recordingURL,
+    phrase: config.chosenVoicePrintPhrase,
+	  contentLanguage: config.contentLanguage,
+	}, async (jsonResponse)=>{
+      console.log("createVoiceEnrollmentByUrl json: ", jsonResponse.message);
+      if ( jsonResponse.responseCode === "SUCC" ) {
+        enrollmentDone();
+      } else {
+        enrollAgain();
+      }
+
+    res.type('text/xml');
+    res.send(twiml.toString());
+  });
+}
+
 // Verification Recording
 const verify = async (req, res) => {
   var twiml = new VoiceResponse();
@@ -210,6 +384,21 @@ const verify = async (req, res) => {
 
   twiml.record({
     action: '/process_verification',
+    maxLength: '5',
+    trim: 'do-not-trim',
+  });
+  res.type('text/xml');
+  res.send(twiml.toString());
+};
+
+const verifyAuth = async (req, res) => {
+  var twiml = new VoiceResponse();
+
+  speak(twiml, 'Please say the following phrase to verify your voice ');
+  speak(twiml, config.chosenVoicePrintPhrase, config.contentLanguage);
+
+  twiml.record({
+    action: '/process_verification_auth',
     maxLength: '5',
     trim: 'do-not-trim',
   });
@@ -266,6 +455,62 @@ const processVerification = async (req, res) => {
               speak(twiml,"Something went wrong. Your verification did not pass, please try again.");
               numTries = numTries + 1;
               twiml.redirect('/verify');
+          }
+      }
+      res.type('text/xml');
+      res.send(twiml.toString());
+  });
+
+};
+
+const processVerificationAuth = async (req, res) => {
+  const userId = await callerUserId(removeSpecialChars(req.body.To));
+  const recordingURL = req.body.RecordingUrl + '.wav';
+  const twiml = new VoiceResponse();
+
+  // Sleep and wait for Twillio to make file available
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  myVoiceIt.voiceVerificationByUrl({
+    userId: userId,
+  	audioFileURL: recordingURL,
+    phrase: config.chosenVoicePrintPhrase,
+  	contentLanguage: config.contentLanguage,
+  	}, async (jsonResponse)=>{
+      console.log("createVoiceVerificationByUrl: ", jsonResponse.message);
+
+      if (jsonResponse.responseCode == "SUCC") {
+        speak(twiml, 'Verification successful!');
+        speak(twiml,'Thank you for calling voice its voice biometrics demo. Have a nice day!');
+        //Hang up
+      } else if (numTries > 2) {
+        //3 attempts failed
+        speak(twiml,'Too many failed attempts. Please call back and select option 1 to re enroll and verify again.');
+      } else {
+        switch (jsonResponse.responseCode) {
+          case "STTF":
+              speak(twiml, "Verification failed. It seems you may not have said your enrolled phrase. Please try again.");
+              numTries = numTries + 1;
+              twiml.redirect('/verify_auth');
+              break;
+          case "FAIL":
+              speak(twiml,"Your verification did not pass, please try again.");
+              numTries = numTries + 1;
+              twiml.redirect('/verify_auth');
+              break;
+          case "SSTQ":
+              speak(twiml,"Please speak a little louder and try again.");
+              numTries = numTries + 1;
+              twiml.redirect('/verify_auth');
+              break;
+          case "SSTL":
+              speak(twiml,"Please speak a little quieter and try again.");
+              numTries = numTries + 1;
+              twiml.redirect('/verify_auth');
+              break;
+          default:
+              speak(twiml,"Something went wrong. Your verification did not pass, please try again.");
+              numTries = numTries + 1;
+              twiml.redirect('/verify_auth');
           }
       }
       res.type('text/xml');
