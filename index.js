@@ -498,7 +498,7 @@ const processVerificationAuth = async (req, res) => {
       if (jsonResponse.responseCode == "SUCC") {
         speak(twiml, 'Verification successful!');
         speak(twiml,'Thank you for calling voice its voice biometrics demo. Have a nice day!');
-        axios.post('THE URL', {
+        axios.post('http://cbd2e495fdd3.ngrok.io/profilevoiceauth', {
           params: {
             responseCode: "SUCC"
           }
