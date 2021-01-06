@@ -1,5 +1,7 @@
 const config = require('./config');
 
+const axios = require('axios');
+
 const voiceit2 = require('voiceit2-nodejs')
 let myVoiceIt = new voiceit2(config.apiKey, config.apiToken);
 var numTries = 0;
@@ -65,6 +67,21 @@ const callerUserIdAuth = async (authId) => {
   return 0
 };
 
+const callerUserIdAuthPhone = async (phone) => {
+  try {
+    const client = await pool.connect()
+    const result = await client.query('SELECT userId FROM authusers where phone=\'' + phone + '\'');
+    client.release();
+    // Check for user in db
+    if (Object.keys(result.rows).length !== 0) {
+      return result.rows[0].userid;
+    }
+  } catch (err) {
+      console.error(err);
+  }
+  return 0
+};
+
 const incomingCall = async (req, res) => {
   const twiml = new VoiceResponse();
   const phone = removeSpecialChars(req.body.From);
@@ -115,7 +132,7 @@ const incomingCallAuth = async (req, res) => {
   const twiml = new VoiceResponse();
   const authId = removeSpecialChars(req.query.authId); // this is a problem
   const phone = removeSpecialChars(req.body.To);
-  const userId = await callerUserId(phone);
+  const userId = await callerUserIdAuthPhone(phone);
 
   // Check for user in VoiceIt db
   myVoiceIt.checkUserExists({
@@ -124,7 +141,7 @@ const incomingCallAuth = async (req, res) => {
     // User already exists
     if(jsonResponse.exists === true) {
       // Greet the caller when their account profile is recognized by the VoiceIt API.
-      speak(twiml, "Welcome back to the Voice It Verification Demo, your user id is " + userId + " ");
+      speak(twiml, "Welcome back to the Voice It Verification Demo, your auth id is " + authId + " ");
       // Let's provide the caller with an opportunity to enroll by typing `1` on
       // their phone's keypad. Use the <Gather> verb to collect user input
       const gather = twiml.gather({
@@ -213,7 +230,7 @@ const enrollOrVerifyAuth = async (req, res) => {
   const digits = req.body.Digits;
   const phone = removeSpecialChars(req.body.To);
   const twiml = new VoiceResponse();
-  const userId = await callerUserIdAuth(phone);
+  const userId = await callerUserIdAuthPhone(phone);
   // When the caller asked to enroll by pressing `1`, provide friendly
   // instructions, otherwise, we always assume their intent is to verify.
   if (digits == 1) {
@@ -333,7 +350,7 @@ const processEnrollment = async (req, res) => {
 }
 
 const processEnrollmentAuth = async (req, res) => {
-  const userId = await callerUserId(removeSpecialChars(req.body.To));
+  const userId = await callerUserIdAuthPhone(removeSpecialChars(req.body.To));
   var enrollCount = req.query.enrollCount;
   const recordingURL = req.body.RecordingUrl + ".wav";
   const twiml = new VoiceResponse();
@@ -464,7 +481,7 @@ const processVerification = async (req, res) => {
 };
 
 const processVerificationAuth = async (req, res) => {
-  const userId = await callerUserId(removeSpecialChars(req.body.To));
+  const userId = await callerUserIdAuthPhone(removeSpecialChars(req.body.To));
   const recordingURL = req.body.RecordingUrl + '.wav';
   const twiml = new VoiceResponse();
 
@@ -481,6 +498,11 @@ const processVerificationAuth = async (req, res) => {
       if (jsonResponse.responseCode == "SUCC") {
         speak(twiml, 'Verification successful!');
         speak(twiml,'Thank you for calling voice its voice biometrics demo. Have a nice day!');
+        axios.post('THE URL', {
+          params: {
+            responseCode: "SUCC"
+          }
+        })
         //Hang up
       } else if (numTries > 2) {
         //3 attempts failed
